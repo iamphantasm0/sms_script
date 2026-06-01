@@ -204,7 +204,7 @@ if (!($_SESSION['authed'] ?? false)) {
     </div>
 
     <script>
-        let activeController = null;
+        let activeSource = null;
         const allButtons = () => document.querySelectorAll('.btn-run');
 
         function setRunning(btn, running) {
@@ -212,48 +212,43 @@ if (!($_SESSION['authed'] ?? false)) {
             btn.classList.toggle('running', running);
         }
 
-        async function runScript(btn) {
+        function runScript(btn) {
             const key = btn.dataset.script;
             const logBox = document.getElementById('log-output');
             const status = document.getElementById('log-status');
 
-            if (activeController) activeController.abort();
-            activeController = new AbortController();
+            if (activeSource) { activeSource.close(); activeSource = null; }
 
             setRunning(btn, true);
             logBox.textContent = '';
             status.textContent = 'Running…';
             status.className = '';
 
-            try {
-                const response = await fetch('run.php?script=' + encodeURIComponent(key), {
-                    signal: activeController.signal
-                });
+            const src = new EventSource('run.php?script=' + encodeURIComponent(key));
+            activeSource = src;
 
-                if (!response.ok) {
-                    throw new Error('Server returned ' + response.status);
+            src.onmessage = function(e) {
+                if (e.data === '__DONE__') {
+                    src.close();
+                    activeSource = null;
+                    setRunning(btn, false);
+                    status.textContent = 'Completed.';
+                    status.className = 'done';
+                    return;
                 }
+                logBox.textContent += e.data + '\n';
+                logBox.scrollTop = logBox.scrollHeight;
+            };
 
-                const reader = response.body.getReader();
-                const decoder = new TextDecoder();
-
-                while (true) {
-                    const { done, value } = await reader.read();
-                    if (done) break;
-                    logBox.textContent += decoder.decode(value, { stream: true });
-                    logBox.scrollTop = logBox.scrollHeight;
-                }
-
-                status.textContent = 'Completed.';
-                status.className = 'done';
-            } catch (err) {
-                if (err.name === 'AbortError') return;
-                status.textContent = 'Error: ' + err.message;
-                status.className = 'error';
-            } finally {
+            src.onerror = function() {
+                src.close();
+                activeSource = null;
                 setRunning(btn, false);
-                activeController = null;
-            }
+                if (status.textContent === 'Running…') {
+                    status.textContent = 'Connection lost.';
+                    status.className = 'error';
+                }
+            };
         }
     </script>
 </body>

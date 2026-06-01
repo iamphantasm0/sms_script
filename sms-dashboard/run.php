@@ -7,7 +7,6 @@ if (!($_SESSION['authed'] ?? false)) {
     exit('Forbidden');
 }
 
-// Validate ?script= against the whitelist — never touch user input directly.
 $key = $_GET['script'] ?? '';
 $scripts = SCRIPTS;
 
@@ -17,50 +16,58 @@ if (!isset($scripts[$key])) {
 }
 
 $scriptPath = $scripts[$key];
-
-// Build a log filename: e.g. logs/four_20250601_143022.log
 $timestamp  = date('Ymd_His');
 $logFile    = LOG_DIR . $key . '_' . $timestamp . '.log';
 
-// Disable all output buffering layers so the browser sees each line immediately.
+// Disable all buffering layers before setting SSE headers.
 @ini_set('output_buffering', 'off');
 @ini_set('zlib.output_compression', false);
 while (@ob_end_flush()) {}
+ob_implicit_flush(true);
 
-header('Content-Type: text/plain; charset=utf-8');
-header('X-Accel-Buffering: no');   // Tells nginx/proxies not to buffer this response.
+header('Content-Type: text/event-stream');
 header('Cache-Control: no-cache');
+header('X-Accel-Buffering: no');
+header('Connection: keep-alive');
+
+// Send one SSE line; multi-line text is split across multiple data: fields.
+function sse(string $text): void {
+    foreach (explode("\n", rtrim($text, "\n")) as $part) {
+        echo 'data: ' . $part . "\n";
+    }
+    echo "\n";
+    flush();
+}
 
 $fh = @fopen($logFile, 'w');
 
-$startLine = '--- Started at ' . date('Y-m-d H:i:s') . " ---\n";
-echo $startLine;
-if ($fh) fwrite($fh, $startLine);
-flush();
+$startLine = '--- Started at ' . date('Y-m-d H:i:s') . ' ---';
+sse($startLine);
+if ($fh) fwrite($fh, $startLine . "\n");
 
-// Open the script as a readable pipe. 2>&1 merges stderr into stdout.
-$proc = popen('bash ' . escapeshellarg($scriptPath) . ' 2>&1', 'r');
+$proc = popen('sudo bash ' . escapeshellarg($scriptPath) . ' 2>&1', 'r');
 
 if (!$proc) {
-    $msg = "ERROR: Failed to start script.\n";
-    echo $msg;
-    if ($fh) { fwrite($fh, $msg); fclose($fh); }
+    sse('ERROR: Failed to start script.');
+    sse('__DONE__');
+    if ($fh) fclose($fh);
     exit;
 }
 
 while (!feof($proc)) {
     $line = fgets($proc);
     if ($line === false) break;
-    echo $line;
+    sse($line);
     if ($fh) fwrite($fh, $line);
-    flush();
 }
 
 pclose($proc);
 
-$endLine = '--- Completed at ' . date('Y-m-d H:i:s') . " ---\n";
-echo $endLine;
+$endLine = '--- Completed at ' . date('Y-m-d H:i:s') . ' ---';
+sse($endLine);
 if ($fh) {
-    fwrite($fh, $endLine);
+    fwrite($fh, $endLine . "\n");
     fclose($fh);
 }
+
+sse('__DONE__');
